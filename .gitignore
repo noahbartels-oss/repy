@@ -1,0 +1,11 @@
+node_modules/
+
+# Secrets and auth — never commit these
+npsso.txt
+.env
+.tokens.json
+
+# Runtime output
+.progress.json
+available.txt
+results.csv
