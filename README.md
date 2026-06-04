@@ -53,6 +53,24 @@ echo "your-64-character-token" > npsso.txt   # file (git-ignored)
 The NPSSO is exchanged for access/refresh tokens cached in `.tokens.json`, so
 you normally only provide it once.
 
+### Discord alerts (optional)
+
+Get a Discord message for every available name found:
+
+1. In your Discord server: **Server Settings → Integrations → Webhooks → New
+   Webhook**, pick a channel, and **Copy Webhook URL**.
+2. Provide it via env var or file (the file is git-ignored):
+
+   ```bash
+   export DISCORD_WEBHOOK="https://discord.com/api/webhooks/..."
+   # or
+   echo "https://discord.com/api/webhooks/..." > discord_webhook.txt
+   ```
+
+When enabled, each hit posts a message like
+`🎯 Available PSN name: zaro (mode: brandable · score: 17)`. Notification
+failures are logged but never stop the run.
+
 ## Modes
 
 | Mode          | Flag           | What it generates                                   |

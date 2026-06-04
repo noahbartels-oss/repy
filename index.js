@@ -11,7 +11,9 @@ import { readFile, writeFile, appendFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { getAuthorization } from "./src/auth.js";
 import { checkAvailability } from "./src/check.js";
-import { buildCandidates, PRESETS } from "./src/generate.js";
+import { buildCandidates, loadWords, PRESETS } from "./src/generate.js";
+import { scoreName } from "./src/score.js";
+import { notifyAvailable, notifyEnabled } from "./src/notify.js";
 
 const STATE_FILE = new URL("./.progress.json", import.meta.url);
 
@@ -125,7 +127,9 @@ Examples:
   node index.js --words              # real 4-letter words
   node index.js --brandable --top 200  # only the 200 most valuable candidates
 
-Auth: set the NPSSO env var or put your token in a file named npsso.txt.`);
+Auth: set the NPSSO env var or put your token in a file named npsso.txt.
+Discord: set DISCORD_WEBHOOK env var or create discord_webhook.txt to get an
+         alert for every available name found.`);
 }
 
 async function loadNpsso() {
@@ -205,6 +209,8 @@ async function main() {
   const progress = await loadProgress(plan.signature, opts.reset);
   const outUrl = new URL(opts.out, import.meta.url);
   const totalLabel = plan.total === null ? "?" : plan.total;
+  const words = loadWords();
+  if (await notifyEnabled()) console.log("Discord notifications: enabled.");
 
   console.log(
     `Mode: ${plan.mode} | length ${opts.length} | ${totalLabel} candidates | ` +
@@ -239,6 +245,7 @@ async function main() {
       availableThisRun++;
       console.log(`  ✓ AVAILABLE: ${name}`);
       await appendFile(outUrl, name + "\n");
+      await notifyAvailable(name, { mode: plan.mode, score: scoreName(name, words) });
     } else if (status === "taken") {
       const pos = plan.total === null ? `#${index}` : `${index}/${plan.total}`;
       process.stdout.write(`  · ${pos} ${name} taken          \r`);

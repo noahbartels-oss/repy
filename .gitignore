@@ -2,6 +2,7 @@ node_modules/
 
 # Secrets and auth — never commit these
 npsso.txt
+discord_webhook.txt
 .env
 .tokens.json
 
