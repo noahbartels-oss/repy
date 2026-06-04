@@ -1,23 +1,27 @@
 #!/usr/bin/env node
-// PSN short-name availability checker.
+// PSN short-name availability checker / sniping bot.
 //
-// Walks every combination of a character set for a given length, asks PSN
-// whether a profile already exists for it, and records the ones that look
-// free. Designed to run for a long time: it rate-limits itself, retries on
-// transient errors, refreshes its auth token, and can resume where it left off.
+// Generates candidate online IDs (pronounceable, dictionary words, brandable
+// patterns, or brute force), asks PSN whether a profile already exists, and
+// records the free ones. Curated modes check the highest brand-scored names
+// first. The run is rate-limited, retries on errors, refreshes its auth token
+// and resumes where it left off.
 
 import { readFile, writeFile, appendFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { getAuthorization } from "./src/auth.js";
 import { checkAvailability } from "./src/check.js";
-import { generate, configSignature, PRESETS } from "./src/generate.js";
+import { buildCandidates, PRESETS } from "./src/generate.js";
 
 const STATE_FILE = new URL("./.progress.json", import.meta.url);
 
 function parseArgs(argv) {
   const opts = {
+    mode: "brandable", // brandable | pattern | words | brute
     length: 4,
     charset: PRESETS.letters,
+    patterns: ["CVCV"],
+    top: Infinity,
     delay: 1300, // ms between requests — be gentle with PSN
     limit: Infinity, // max candidates to check this run
     out: "available.txt",
@@ -27,6 +31,22 @@ function parseArgs(argv) {
     const arg = argv[i];
     const next = () => argv[++i];
     switch (arg) {
+      case "--brandable":
+        opts.mode = "brandable";
+        break;
+      case "--words":
+        opts.mode = "words";
+        break;
+      case "--brute":
+        opts.mode = "brute";
+        break;
+      case "--pattern":
+        opts.mode = "pattern";
+        opts.patterns = next()
+          .split(",")
+          .map((p) => p.trim())
+          .filter(Boolean);
+        break;
       case "--length":
       case "-n":
         opts.length = Number(next());
@@ -42,6 +62,9 @@ function parseArgs(argv) {
         break;
       case "--all":
         opts.charset = PRESETS.letters + PRESETS.digits + PRESETS.symbols;
+        break;
+      case "--top":
+        opts.top = Number(next());
         break;
       case "--delay":
         opts.delay = Number(next());
@@ -70,24 +93,39 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`PSN short-name availability checker
+  console.log(`PSN short-name checker / sniping bot
 
-Usage: node index.js [options]
+Usage: node index.js [mode] [options]
+
+Modes (pick one; default: --brandable):
+  --brandable        Curated pronounceable patterns (nexo, lumi, zaro...)
+  --pattern <list>   Custom templates, comma-separated. Symbols:
+                       C=consonant V=vowel L=letter D=digit A=alphanumeric
+                       e.g. --pattern CVCV,CVCD
+  --words            Real dictionary words of the given length
+  --brute            Every combination of a character set (huge!)
 
 Options:
   -n, --length <n>   Name length (default: 4)
-  --charset <chars>  Custom set of characters to combine
-  --letters          Use a-z (default)
-  --alnum            Use a-z and 0-9
-  --all              Use a-z, 0-9, hyphen and underscore
+  --top <n>          Only check the best-scored N candidates (curated modes)
+  --charset <chars>  Custom characters for --brute
+  --letters          --brute over a-z (default)
+  --alnum            --brute over a-z and 0-9
+  --all              --brute over a-z, 0-9, hyphen, underscore
   --delay <ms>       Delay between requests (default: 1300)
   --limit <n>        Max names to check this run (default: unlimited)
   --out <file>       File to append available names to (default: available.txt)
   --reset            Ignore saved progress and start over
   -h, --help         Show this help
 
-Auth: set the NPSSO env var or put your token in a file named npsso.txt.
-      See the README for how to get an NPSSO token.`);
+Examples:
+  node index.js                      # best 4-letter brandable names first
+  node index.js --pattern CVCV       # all consonant-vowel-consonant-vowel
+  node index.js --pattern CVCD       # like "zar7": letter-vowel-letter-digit
+  node index.js --words              # real 4-letter words
+  node index.js --brandable --top 200  # only the 200 most valuable candidates
+
+Auth: set the NPSSO env var or put your token in a file named npsso.txt.`);
 }
 
 async function loadNpsso() {
@@ -104,7 +142,7 @@ async function loadProgress(signature, reset) {
   try {
     const state = JSON.parse(await readFile(STATE_FILE, "utf8"));
     if (state.signature === signature) return state;
-    console.log("Config changed since last run — starting fresh.");
+    console.log("Config changed since last run — starting fresh for this config.");
   } catch {
     /* no saved progress */
   }
@@ -128,9 +166,7 @@ async function checkWithRetry(getAuth, name, baseDelay) {
       const status = err?.response?.status ?? err?.status;
       const isLast = attempt === maxAttempts;
       const isRateLimit = status === 429;
-      const wait = isRateLimit
-        ? baseDelay * 2 ** attempt + 5000
-        : baseDelay * 2 ** attempt;
+      const wait = isRateLimit ? baseDelay * 2 ** attempt + 5000 : baseDelay * 2 ** attempt;
       if (isLast) {
         console.warn(`  ! "${name}" failed after ${maxAttempts} attempts: ${err.message}`);
         return "error";
@@ -148,10 +184,16 @@ async function checkWithRetry(getAuth, name, baseDelay) {
 
 async function main() {
   const opts = parseArgs(process.argv);
-  const signature = configSignature(opts.charset, opts.length);
+
+  let plan;
+  try {
+    plan = buildCandidates(opts);
+  } catch (err) {
+    console.error(`Could not build candidates: ${err.message}`);
+    process.exit(1);
+  }
 
   const npsso = await loadNpsso();
-  // Cache the authorization and let getAuthorization refresh it as needed.
   const getAuth = () => getAuthorization(npsso);
   try {
     await getAuth();
@@ -160,12 +202,13 @@ async function main() {
     process.exit(1);
   }
 
-  const progress = await loadProgress(signature, opts.reset);
+  const progress = await loadProgress(plan.signature, opts.reset);
   const outUrl = new URL(opts.out, import.meta.url);
+  const totalLabel = plan.total === null ? "?" : plan.total;
 
   console.log(
-    `Checking length-${opts.length} names from "${opts.charset}" ` +
-      `(starting at #${progress.done}, delay ${opts.delay}ms).`,
+    `Mode: ${plan.mode} | length ${opts.length} | ${totalLabel} candidates | ` +
+      `delay ${opts.delay}ms | starting at #${progress.done}.`,
   );
   if (existsSync(outUrl)) {
     console.log(`Appending available names to ${opts.out} (existing file kept).`);
@@ -181,7 +224,7 @@ async function main() {
     stopping = true;
   });
 
-  for (const name of generate(opts.charset, opts.length)) {
+  for (const name of plan.candidates) {
     if (index < progress.done) {
       index++;
       continue; // already checked in a previous run
@@ -197,13 +240,12 @@ async function main() {
       console.log(`  ✓ AVAILABLE: ${name}`);
       await appendFile(outUrl, name + "\n");
     } else if (status === "taken") {
-      process.stdout.write(`  · ${name} taken\r`);
+      const pos = plan.total === null ? `#${index}` : `${index}/${plan.total}`;
+      process.stdout.write(`  · ${pos} ${name} taken          \r`);
     }
 
-    // Persist progress (only advance past names we actually resolved).
-    if (status !== "error") {
-      await saveProgress(signature, index);
-    }
+    // Only advance saved progress past names we actually resolved.
+    if (status !== "error") await saveProgress(plan.signature, index);
 
     await sleep(opts.delay);
   }
